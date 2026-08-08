@@ -107,6 +107,12 @@ func (s *BindingTokenService) RedeemAndBind(ctx context.Context, raw string, mul
 		}
 		return RedeemedBindingToken{}, fmt.Errorf("consume token: %w", err)
 	}
+	if err := validateBindingTokenChannel(row); err != nil {
+		// The token table is shared across channel adapters. Keep a token from
+		// another adapter from being redeemed through Telegram; returning here
+		// rolls the consume back with the surrounding transaction.
+		return RedeemedBindingToken{}, err
+	}
 
 	// Explicit membership gate (no member FK): returning before Commit rolls
 	// the consume back, so a non-member's attempt does not burn the token.
@@ -142,6 +148,13 @@ func (s *BindingTokenService) RedeemAndBind(ctx context.Context, raw string, mul
 		InstallationID: row.InstallationID,
 		TelegramUserID: row.ChannelUserID,
 	}, nil
+}
+
+func validateBindingTokenChannel(row db.ChannelBindingToken) error {
+	if row.ChannelType != string(TypeTelegram) {
+		return ErrBindingTokenInvalid
+	}
+	return nil
 }
 
 func randomBindingToken(n int) (string, error) {

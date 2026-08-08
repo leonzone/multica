@@ -16,6 +16,7 @@ import (
 
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/integrations/channel"
+	"github.com/multica-ai/multica/server/internal/integrations/channel/engine"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
@@ -47,6 +48,7 @@ type Outbound struct {
 // *db.Queries satisfies it.
 type outboundQueries interface {
 	GetAgentTask(ctx context.Context, id pgtype.UUID) (db.AgentTaskQueue, error)
+	TaskHasChannelIngestedMessages(ctx context.Context, taskID pgtype.UUID) (bool, error)
 	GetChannelChatSessionBindingBySession(ctx context.Context, arg db.GetChannelChatSessionBindingBySessionParams) (db.ChannelChatSessionBinding, error)
 	GetChannelInstallation(ctx context.Context, arg db.GetChannelInstallationParams) (db.ChannelInstallation, error)
 }
@@ -136,10 +138,10 @@ func (o *Outbound) handleTaskMessage(e events.Event) {
 func (o *Outbound) pushPartial(ctx context.Context, target *replyTarget, st *streamState, msgID int64, snapshot string) {
 	api := newBotAPI(o.apiBase, target.botToken, o.client)
 	text := snapshot
-	if len([]rune(text)) > maxMessageRunes {
+	if utf16Units(text) > maxMessageUnits {
 		// Mid-stream overflow: freeze the streamed message at the cap; the full
 		// reply is delivered in chunks by the final EventChatDone send.
-		text = string([]rune(text)[:maxMessageRunes])
+		text = chunkMessage(text, maxMessageUnits)[0]
 	}
 	if msgID == 0 {
 		m, err := api.SendMessage(ctx, sendMessageParams{
@@ -212,7 +214,7 @@ func (o *Outbound) finishChat(ctx context.Context, e events.Event) error {
 		return nil
 	}
 	api := newBotAPI(o.apiBase, target.botToken, o.client)
-	chunks := chunkMessage(content, maxMessageRunes)
+	chunks := chunkMessage(content, maxMessageUnits)
 
 	start := 0
 	if st != nil && st.messageID != 0 {
@@ -287,20 +289,25 @@ type replyTarget struct {
 // chat session id is recovered from the task row (EventTaskMessage carries
 // only TaskID).
 func (o *Outbound) resolveTarget(ctx context.Context, e events.Event, viaTask bool) (*replyTarget, error) {
+	var task *db.AgentTaskQueue
 	sessionID, err := util.ParseUUID(e.ChatSessionID)
 	if err != nil || !sessionID.Valid {
 		if !viaTask {
 			return nil, nil
 		}
-		taskID, terr := util.ParseUUID(e.TaskID)
-		if terr != nil || !taskID.Valid {
+		taskID, ok := eventTaskID(e)
+		if !ok {
 			return nil, nil
 		}
-		task, terr := o.q.GetAgentTask(ctx, taskID)
-		if terr != nil || !task.ChatSessionID.Valid {
+		taskRow, terr := o.q.GetAgentTask(ctx, taskID)
+		if terr != nil {
+			return nil, fmt.Errorf("load agent task: %w", terr)
+		}
+		if !taskRow.ChatSessionID.Valid {
 			return nil, nil
 		}
-		sessionID = task.ChatSessionID
+		task = &taskRow
+		sessionID = taskRow.ChatSessionID
 	}
 	binding, err := o.q.GetChannelChatSessionBindingBySession(ctx, db.GetChannelChatSessionBindingBySessionParams{
 		ChatSessionID: sessionID,
@@ -312,14 +319,27 @@ func (o *Outbound) resolveTarget(ctx context.Context, e events.Event, viaTask bo
 		}
 		return nil, fmt.Errorf("lookup telegram chat binding: %w", err)
 	}
-	// Tasks triggered from web/mobile on a Telegram-originated session reply
-	// only in Multica (chat_input_task_id set) — same fail-closed origin rule
-	// as Slack.
-	if taskID, ok := eventTaskID(e); ok {
-		task, terr := o.q.GetAgentTask(ctx, taskID)
-		if terr == nil && task.ChatInputTaskID.Valid {
-			return nil, nil
+	// A bound session can be reused by web/mobile tasks. Only a task whose
+	// immutable input provenance came from a channel may reply to Telegram;
+	// chat_input_task_id alone cannot distinguish direct tasks from channel
+	// tasks. Fail closed when the task id or provenance lookup is unavailable.
+	taskID, ok := eventTaskID(e)
+	if !ok {
+		return nil, nil
+	}
+	if task == nil {
+		taskRow, terr := o.q.GetAgentTask(ctx, taskID)
+		if terr != nil {
+			return nil, fmt.Errorf("load agent task: %w", terr)
 		}
+		task = &taskRow
+	}
+	deliver, err := engine.TaskInputIsChannelIngested(ctx, o.q, *task)
+	if err != nil {
+		return nil, fmt.Errorf("classify task input origin: %w", err)
+	}
+	if !deliver {
+		return nil, nil
 	}
 	inst, err := o.q.GetChannelInstallation(ctx, db.GetChannelInstallationParams{
 		ID:          binding.InstallationID,

@@ -785,6 +785,7 @@
     "preview_description": "暗号化キーは設定済みですが、このデプロイではまだインストールできません。利用可能になると接続ボタンがここに表示されます。",
     "connected_bots": "接続済みのボット",
     "loading": "読み込み中…",
+    "load_failed": "Telegram のインストールを読み込めませんでした",
     "empty_title": "接続済みのボットはまだありません",
     "empty_description_prefix": "このワークスペースのエージェントを開き、",
     "empty_description_cta": "Telegram に接続",

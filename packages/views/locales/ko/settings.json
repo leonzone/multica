@@ -551,6 +551,7 @@
     "preview_description": "암호화 키는 설정되어 있지만 이 배포에서는 아직 설치할 수 없습니다. 가능해지면 연결 버튼이 여기에 표시됩니다.",
     "connected_bots": "연결된 봇",
     "loading": "불러오는 중…",
+    "load_failed": "Telegram 설치를 불러오지 못했습니다",
     "empty_title": "아직 연결된 봇이 없습니다",
     "empty_description_prefix": "이 워크스페이스의 에이전트를 열고",
     "empty_description_cta": "Telegram 연결",

@@ -785,6 +785,7 @@
     "preview_description": "静态加密密钥已设置，但本部署暂未开放安装。开放后，连接按钮会出现在这里。",
     "connected_bots": "已连接的机器人",
     "loading": "加载中…",
+    "load_failed": "加载 Telegram 安装失败",
     "empty_title": "尚未连接机器人",
     "empty_description_prefix": "在本工作区打开一个智能体，点击",
     "empty_description_cta": "连接 Telegram",

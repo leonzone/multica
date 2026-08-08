@@ -143,6 +143,8 @@ func (h *Handler) RegisterTelegramBot(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "this Telegram bot is connected to an archived agent in this workspace — restore that agent, or disconnect its bot, before connecting it here")
 		case errors.Is(err, telegram.ErrBotOwnedByAnotherWorkspace):
 			writeError(w, http.StatusConflict, "this Telegram bot is already connected to a different Multica workspace — disconnect it there before connecting it here")
+		case errors.Is(err, telegram.ErrWebhookConfigured):
+			writeError(w, http.StatusBadRequest, "this Telegram bot has a webhook configured — remove the webhook before connecting it with long polling")
 		default:
 			// The dominant non-sentinel failure is getMe rejecting the pasted
 			// token (a user error): guide the user rather than surface a 500.

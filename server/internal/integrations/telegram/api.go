@@ -32,6 +32,19 @@ const longPollTimeoutSecs = 50
 // instead of a silent message tug-of-war.
 var ErrConflict = errors.New("telegram: bot is already being polled by another instance (409 conflict)")
 
+// requestError deliberately omits the request URL from Error(). Bot API URLs
+// contain the bot token, while net/http transport errors can include that URL.
+// Unwrap preserves cancellation and transport classification without making
+// the credential loggable through the outer error string.
+type requestError struct {
+	method string
+	cause  error
+}
+
+func (e *requestError) Error() string { return fmt.Sprintf("telegram: %s request failed", e.method) }
+
+func (e *requestError) Unwrap() error { return e.cause }
+
 // apiError is a non-OK Bot API response.
 type apiError struct {
 	Code        int
@@ -106,7 +119,7 @@ func (a *botAPI) call(ctx context.Context, method string, params any, out any) e
 	}
 	resp, err := a.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("telegram: %s: %w", method, err)
+		return &requestError{method: method, cause: err}
 	}
 	defer resp.Body.Close()
 	var env envelope
@@ -177,6 +190,20 @@ func (a *botAPI) GetMe(ctx context.Context) (User, error) {
 	return u, err
 }
 
+// WebhookInfo is the subset of the Bot API webhook status needed before
+// starting a long-polling installation.
+type WebhookInfo struct {
+	URL                string `json:"url"`
+	PendingUpdateCount int    `json:"pending_update_count"`
+}
+
+// GetWebhookInfo detects a webhook that would make getUpdates unavailable.
+func (a *botAPI) GetWebhookInfo(ctx context.Context) (WebhookInfo, error) {
+	var info WebhookInfo
+	err := a.call(ctx, "getWebhookInfo", nil, &info)
+	return info, err
+}
+
 type getUpdatesParams struct {
 	Offset         int64    `json:"offset,omitempty"`
 	Timeout        int      `json:"timeout"`
@@ -216,6 +243,20 @@ type sendMessageParams struct {
 func (a *botAPI) SendMessage(ctx context.Context, p sendMessageParams) (Message, error) {
 	var m Message
 	err := a.call(ctx, "sendMessage", p, &m)
+	return m, err
+}
+
+// sendMessageWithRetryAfter honors Telegram's explicit 429 backoff once. It
+// deliberately does not retry transport or other API errors because a lost
+// response can mean Telegram already accepted the message.
+func sendMessageWithRetryAfter(ctx context.Context, a *botAPI, p sendMessageParams) (Message, error) {
+	m, err := a.SendMessage(ctx, p)
+	if wait, ok := retryAfter(err); ok {
+		if !sleepCtx(ctx, wait) {
+			return Message{}, ctx.Err()
+		}
+		return a.SendMessage(ctx, p)
+	}
 	return m, err
 }
 

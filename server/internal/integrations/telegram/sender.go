@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strconv"
 	"strings"
 
@@ -15,15 +16,17 @@ import (
 // the Lark adapter's product voice (conventions.zh.mdx); the binding prompt
 // carries the redeem link.
 const (
-	msgAgentOffline    = "⚠️ 智能体当前离线，消息已记录。下次 daemon 上线后会自动继续处理。"
-	msgAgentArchived   = "⚠️ 该智能体已归档，无法回复。请联系工作区管理员。"
-	msgUnsupportedType = "暂不支持此类消息，请发送文字内容。"
+	msgAgentOffline     = "⚠️ 智能体当前离线，消息已记录。下次 daemon 上线后会自动继续处理。"
+	msgAgentArchived    = "⚠️ 该智能体已归档，无法回复。请联系工作区管理员。"
+	msgUnsupportedType  = "暂不支持此类消息，请发送文字内容。"
+	msgBindingGroupHint = "请先私聊我发送一条消息，再完成 Multica 账号绑定。"
 )
 
-// maxMessageRunes caps one outbound sendMessage body. Telegram hard-caps a
-// message at 4096 UTF-16 code units; 3500 runes leaves headroom for HTML tags
-// added by the markdown conversion.
-const maxMessageRunes = 3500
+// maxMessageUnits caps one outbound sendMessage body. Telegram hard-caps a
+// message at 4096 UTF-16 code units after entity parsing; 3500 units leaves
+// headroom for the markdown conversion while counting astral characters (such
+// as emoji) correctly.
+const maxMessageUnits = 3500
 
 // sender posts agent replies back to Telegram via sendMessage. Outbound half
 // only; the installation identity is resolved per message by the Router.
@@ -61,8 +64,8 @@ func (s *sender) Send(ctx context.Context, out channel.OutboundMessage) (channel
 	}
 
 	var lastID string
-	for _, chunk := range chunkMessage(out.Text, maxMessageRunes) {
-		m, err := s.api.SendMessage(ctx, sendMessageParams{
+	for _, chunk := range chunkMessage(out.Text, maxMessageUnits) {
+		m, err := sendMessageWithRetryAfter(ctx, s.api, sendMessageParams{
 			ChatID:           chatID,
 			Text:             formatHTML(chunk),
 			ParseMode:        "HTML",
@@ -70,8 +73,13 @@ func (s *sender) Send(ctx context.Context, out channel.OutboundMessage) (channel
 			ReplyToMessageID: replyTo,
 		})
 		if err != nil {
-			// HTML rejection fallback: send the raw markdown as plain text.
-			m, err = s.api.SendMessage(ctx, sendMessageParams{
+			// HTML rejection fallback: send the raw markdown as plain text. Do
+			// not retry transport or unrelated API errors: the first request may
+			// already have reached Telegram, and retrying could duplicate it.
+			if !isHTMLParseError(err) {
+				return channel.SendResult{}, fmt.Errorf("telegram: sendMessage: %w", err)
+			}
+			m, err = sendMessageWithRetryAfter(ctx, s.api, sendMessageParams{
 				ChatID:           chatID,
 				Text:             chunk,
 				MessageThreadID:  threadID,
@@ -97,29 +105,64 @@ func parseMessageRef(ref string) int64 {
 	return id
 }
 
-// chunkMessage splits text into <=maxRunes pieces on rune boundaries,
-// preferring newline breaks so code blocks and paragraphs split cleanly.
-func chunkMessage(text string, maxRunes int) []string {
+// chunkMessage splits text into <=maxUnits UTF-16 code-unit pieces on rune
+// boundaries, preferring newline breaks so code blocks and paragraphs split
+// cleanly.
+func chunkMessage(text string, maxUnits int) []string {
 	runes := []rune(text)
-	if maxRunes <= 0 || len(runes) <= maxRunes {
+	if maxUnits <= 0 || utf16Units(text) <= maxUnits {
 		return []string{text}
 	}
 	var chunks []string
 	for len(runes) > 0 {
-		n := maxRunes
-		if n > len(runes) {
-			n = len(runes)
-		} else {
-			// Prefer the last newline inside the window.
-			window := runes[:n]
-			if i := lastIndexRune(window, '\n'); i > maxRunes/2 {
-				n = i + 1
+		n := 0
+		end := 0
+		for i, r := range runes {
+			units := 1
+			if r > 0xFFFF {
+				units = 2
 			}
+			if n+units > maxUnits {
+				break
+			}
+			n += units
+			end = i + 1
 		}
-		chunks = append(chunks, strings.TrimRight(string(runes[:n]), "\n"))
-		runes = runes[n:]
+		if end == 0 {
+			end = 1
+		}
+		// Prefer the last newline in the window, but only when it leaves a
+		// substantial first chunk rather than producing tiny fragments.
+		if i := lastIndexRune(runes[:end], '\n'); i >= 0 && utf16Units(string(runes[:i])) > maxUnits/2 {
+			end = i + 1
+		}
+		chunks = append(chunks, strings.TrimRight(string(runes[:end]), "\n"))
+		runes = runes[end:]
 	}
 	return chunks
+}
+
+func utf16Units(s string) int {
+	n := 0
+	for _, r := range s {
+		if r > 0xFFFF {
+			n += 2
+		} else {
+			n++
+		}
+	}
+	return n
+}
+
+func isHTMLParseError(err error) bool {
+	var ae *apiError
+	if !errors.As(err, &ae) || ae.Code != http.StatusBadRequest {
+		return false
+	}
+	description := strings.ToLower(ae.Description)
+	return strings.Contains(description, "parse entities") ||
+		strings.Contains(description, "unsupported start tag") ||
+		strings.Contains(description, "can't find end tag")
 }
 
 func lastIndexRune(rs []rune, r rune) int {

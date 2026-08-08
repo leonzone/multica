@@ -54,7 +54,7 @@ export function TelegramTab() {
   const canManage =
     currentMember?.role === "owner" || currentMember?.role === "admin";
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError } = useQuery({
     ...telegramInstallationsOptions(wsId),
     enabled: !!wsId,
   });
@@ -86,18 +86,26 @@ export function TelegramTab() {
   return (
     <div className="space-y-8">
       <section className="space-y-1">
-        <p className="text-sm text-muted-foreground">
+        <p className="text-body text-muted-foreground">
           {t(($) => $.telegram.page_description)}
         </p>
       </section>
 
-      {!configured ? (
+      {isError ? (
+        <Card>
+          <CardContent>
+            <p className="text-body text-muted-foreground">
+              {t(($) => $.telegram.load_failed)}
+            </p>
+          </CardContent>
+        </Card>
+      ) : !configured ? (
         <Card>
           <CardContent className="space-y-2">
-            <p className="text-sm font-medium">{t(($) => $.telegram.not_enabled_title)}</p>
-            <p className="text-xs text-muted-foreground">
+            <p className="text-body font-medium">{t(($) => $.telegram.not_enabled_title)}</p>
+            <p className="text-caption text-muted-foreground">
               {t(($) => $.telegram.not_enabled_description_prefix)}{" "}
-              <code className="rounded bg-muted px-1 py-0.5 text-[10px]">
+              <code className="rounded bg-muted px-1 py-0.5 text-micro">
                 MULTICA_TELEGRAM_SECRET_KEY
               </code>{" "}
               {t(($) => $.telegram.not_enabled_description_suffix)}{" "}
@@ -107,18 +115,18 @@ export function TelegramTab() {
         </Card>
       ) : (
         <section className="space-y-3">
-          <h2 className="text-sm font-semibold">{t(($) => $.telegram.connected_bots)}</h2>
+          <h2 className="text-body font-semibold">{t(($) => $.telegram.connected_bots)}</h2>
           {isLoading ? (
             <Card>
               <CardContent>
-                <p className="text-sm text-muted-foreground">{t(($) => $.telegram.loading)}</p>
+                <p className="text-body text-muted-foreground">{t(($) => $.telegram.loading)}</p>
               </CardContent>
             </Card>
           ) : installations.length === 0 ? (
             <Card>
               <CardContent className="space-y-2">
-                <p className="text-sm font-medium">{t(($) => $.telegram.empty_title)}</p>
-                <p className="text-xs text-muted-foreground">
+                <p className="text-body font-medium">{t(($) => $.telegram.empty_title)}</p>
+                <p className="text-caption text-muted-foreground">
                   {t(($) => $.telegram.empty_description_prefix)}{" "}
                   <strong>{t(($) => $.telegram.empty_description_cta)}</strong>{" "}
                   {t(($) => $.telegram.empty_description_suffix)}
@@ -197,20 +205,20 @@ function InstallationRow({
           profileLink
         />
         <div className="space-y-1">
-          <p className="text-sm font-medium">
+          <p className="text-body font-medium">
             {agentName}
             {installation.bot_username ? (
-              <span className="ml-2 text-xs text-muted-foreground">
+              <span className="ml-2 text-caption text-muted-foreground">
                 @{installation.bot_username}
               </span>
             ) : null}
             {!isActive && (
-              <span className="ml-2 rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+              <span className="ml-2 rounded bg-muted px-1.5 py-0.5 text-micro text-muted-foreground">
                 {t(($) => $.telegram.revoked_badge)}
               </span>
             )}
           </p>
-          <p className="text-[10px] text-muted-foreground">
+          <p className="text-micro text-muted-foreground">
             {t(($) => $.telegram.installed_at_label, {
               when: new Date(installation.installed_at).toLocaleString(),
             })}
@@ -310,7 +318,10 @@ export function TelegramAgentBindButton({
     if (submitting || !agentId || !bot_token) return;
     setSubmitting(true);
     try {
-      await api.registerTelegramBot(wsId, agentId, { bot_token });
+      const installation = await api.registerTelegramBot(wsId, agentId, { bot_token });
+      if (!installation.id || installation.status !== "active") {
+        throw new Error("Telegram connection returned an invalid installation");
+      }
       // The telegram_installation realtime event also refreshes this list, but
       // invalidate explicitly so the connected badge appears immediately.
       await qc.invalidateQueries({ queryKey: telegramKeys.installations(wsId) });
@@ -358,14 +369,14 @@ export function TelegramAgentBindButton({
             <DialogTitle>{t(($) => $.telegram.connect_dialog_title)}</DialogTitle>
           </DialogHeader>
 
-          <p className="text-xs text-muted-foreground">
+          <p className="text-caption text-muted-foreground">
             {t(($) => $.telegram.connect_dialog_description)}
           </p>
 
           <button
             type="button"
             onClick={() => openExternal(telegramDocsUrl(i18n.language))}
-            className="inline-flex w-fit items-center gap-2 text-sm font-medium text-primary underline-offset-2 hover:underline"
+            className="inline-flex w-fit items-center gap-2 text-body font-medium text-primary underline-offset-2 hover:underline"
             data-testid="telegram-docs-link"
           >
             <ExternalLink className="h-4 w-4" />
@@ -429,7 +440,7 @@ function TelegramAgentBotStatusRow({
       type="button"
       onClick={onClick}
       className={cn(
-        "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
+        "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-caption text-muted-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
         className,
       )}
       data-testid="telegram-agent-bot-status"
@@ -480,7 +491,7 @@ function TelegramAgentBotConnectedBadge({
       data-testid="telegram-agent-bot-connected"
     >
       <div className="flex items-center justify-between gap-3">
-        <span className="inline-flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+        <span className="inline-flex min-w-0 items-center gap-2 text-caption text-muted-foreground">
           <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500" />
           <span className="truncate">
             {t(($) => $.telegram.agent_bot_connected_label)}
@@ -507,7 +518,7 @@ function TelegramAgentBotConnectedBadge({
         <button
           type="button"
           onClick={() => openExternal(`https://t.me/${installation.bot_username}`)}
-          className="inline-flex items-center gap-1 text-xs text-muted-foreground underline-offset-2 transition-colors hover:text-foreground hover:underline"
+          className="inline-flex items-center gap-1 text-caption text-muted-foreground underline-offset-2 transition-colors hover:text-foreground hover:underline"
           title={t(($) => $.telegram.agent_bot_manage_tooltip)}
         >
           <ExternalLink className="h-3 w-3" />

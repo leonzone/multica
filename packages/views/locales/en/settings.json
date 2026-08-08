@@ -786,6 +786,7 @@
     "preview_description": "The at-rest key is set, but installs are not available in this deployment yet. The Connect button will appear here once they are.",
     "connected_bots": "Connected bots",
     "loading": "Loading…",
+    "load_failed": "Failed to load Telegram installations",
     "empty_title": "No bots connected yet",
     "empty_description_prefix": "Open an Agent in this workspace and click",
     "empty_description_cta": "Connect Telegram",

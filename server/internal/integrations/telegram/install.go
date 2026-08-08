@@ -40,6 +40,10 @@ var (
 	ErrBotOwnedBySameWorkspace = errors.New("telegram: this bot is already connected to another agent in this workspace")
 	// ErrBotOwnedByArchivedAgent: the bot's owning agent is archived.
 	ErrBotOwnedByArchivedAgent = errors.New("telegram: this bot is connected to an archived agent in this workspace")
+	// ErrWebhookConfigured means the bot is currently managed by an outgoing
+	// webhook. Long polling and webhooks are mutually exclusive, so do not
+	// silently delete another integration's webhook during installation.
+	ErrWebhookConfigured = errors.New("telegram: bot has an outgoing webhook configured")
 )
 
 // installQueries is the slice of generated queries InstallService needs,
@@ -125,12 +129,20 @@ func (s *InstallService) Register(ctx context.Context, p RegisterParams) (db.Cha
 	if err != nil {
 		return db.ChannelInstallation{}, err
 	}
-	me, err := newBotAPI(s.apiBase, token, s.httpClient).GetMe(ctx)
+	api := newBotAPI(s.apiBase, token, s.httpClient)
+	me, err := api.GetMe(ctx)
 	if err != nil {
 		return db.ChannelInstallation{}, fmt.Errorf("telegram getMe: %w", err)
 	}
 	if !me.IsBot || me.Username == "" {
 		return db.ChannelInstallation{}, errors.New("telegram getMe: response is not a bot with a username")
+	}
+	webhook, err := api.GetWebhookInfo(ctx)
+	if err != nil {
+		return db.ChannelInstallation{}, fmt.Errorf("telegram getWebhookInfo: %w", err)
+	}
+	if webhook.URL != "" {
+		return db.ChannelInstallation{}, ErrWebhookConfigured
 	}
 
 	sealed, err := s.box.Seal([]byte(token))

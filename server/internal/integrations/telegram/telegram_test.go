@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -174,6 +175,43 @@ func TestRetryAfterOn429(t *testing.T) {
 	}
 }
 
+func TestGetWebhookInfo(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/getWebhookInfo") {
+			t.Fatalf("path = %q, want getWebhookInfo", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"url":"https://example.test/telegram","pending_update_count":3}}`))
+	}))
+	defer srv.Close()
+
+	info, err := newBotAPI(srv.URL, "123:secret", srv.Client()).GetWebhookInfo(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.URL != "https://example.test/telegram" || info.PendingUpdateCount != 3 {
+		t.Fatalf("webhook info = %+v", info)
+	}
+}
+
+func TestTransportErrorDoesNotExposeBotToken(t *testing.T) {
+	transportErr := errors.New("dial tcp 123:secret@example.test:443: connection refused")
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, transportErr
+	})}
+
+	_, err := newBotAPI("https://api.example.test", "123:secret", client).GetMe(context.Background())
+	if err == nil {
+		t.Fatal("expected transport error")
+	}
+	if strings.Contains(err.Error(), "123:secret") {
+		t.Fatalf("transport error exposed bot token: %v", err)
+	}
+	if !errors.Is(err, transportErr) {
+		t.Fatalf("errors.Is lost transport cause: %v", err)
+	}
+}
+
 func TestConnectDispatchesAndAdvancesOffset(t *testing.T) {
 	var calls atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -241,6 +279,41 @@ func TestChunkMessagePrefersNewlines(t *testing.T) {
 	}
 }
 
+func TestChunkMessageCountsUTF16Units(t *testing.T) {
+	chunks := chunkMessage("😀a😀", 3)
+	if len(chunks) != 2 || chunks[0] != "😀a" || chunks[1] != "😀" {
+		t.Fatalf("chunks = %#v", chunks)
+	}
+	for _, chunk := range chunks {
+		if got := utf16Units(chunk); got > 3 {
+			t.Errorf("chunk %q uses %d UTF-16 units", chunk, got)
+		}
+	}
+}
+
+func TestSenderFallsBackOnlyForHTMLParseErrors(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		if calls == 1 {
+			_, _ = w.Write([]byte(`{"ok":false,"error_code":400,"description":"Bad Request: can't parse entities"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":7,"chat":{"id":42,"type":"private"}}}`))
+	}))
+	defer srv.Close()
+
+	s := newSender(newBotAPI(srv.URL, "123:secret", srv.Client()), testLogger())
+	result, err := s.Send(context.Background(), channel.OutboundMessage{ChatID: "42", Text: "literal <tag>"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 || result.MessageID != "42:7" {
+		t.Fatalf("calls=%d result=%+v", calls, result)
+	}
+}
+
 func TestFormatHTML(t *testing.T) {
 	got := formatHTML("# Title\n**bold** and `code` and [link](https://e.co/a_b)\n```go\nx < 1\n```")
 	for _, want := range []string{
@@ -260,3 +333,7 @@ func TestFormatHTML(t *testing.T) {
 }
 
 func testLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

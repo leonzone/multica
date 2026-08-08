@@ -24,13 +24,17 @@ const mockRegister = vi.hoisted(() => vi.fn());
 const mockDeleteInstallation = vi.hoisted(() => vi.fn());
 const mockOpenExternal = vi.hoisted(() => vi.fn());
 const mockInvalidate = vi.hoisted(() => vi.fn());
+const mockToastError = vi.hoisted(() => vi.fn());
+const telegramQueryErrorRef = vi.hoisted(() => ({ current: false }));
 
 vi.mock("@tanstack/react-query", () => ({
   useQuery: (opts: { queryKey: unknown[]; enabled?: boolean }) => {
     if (opts.enabled === false) return { data: undefined, isLoading: false };
     const key = JSON.stringify(opts.queryKey);
     if (key.includes("members")) return { data: membersRef.current, isLoading: false };
-    if (key.includes("installations")) return { data: installationsRef.current, isLoading: false };
+    if (key.includes("installations")) {
+      return { data: installationsRef.current, isLoading: false, isError: telegramQueryErrorRef.current };
+    }
     return { data: undefined, isLoading: false };
   },
   useQueryClient: () => ({ invalidateQueries: mockInvalidate }),
@@ -85,7 +89,7 @@ vi.mock("@multica/core/auth", () => {
 });
 
 vi.mock("sonner", () => ({
-  toast: { success: vi.fn(), error: vi.fn(), message: vi.fn() },
+  toast: { success: vi.fn(), error: mockToastError, message: vi.fn() },
 }));
 
 vi.mock("../../platform", () => ({ openExternal: mockOpenExternal }));
@@ -106,6 +110,7 @@ function resetFixtures() {
   vi.clearAllMocks();
   membersRef.current = [{ user_id: "user-1", role: "owner" }];
   installationsRef.current = { installations: [], configured: true, install_supported: true };
+  telegramQueryErrorRef.current = false;
 }
 
 describe("TelegramAgentBindButton", () => {
@@ -124,6 +129,16 @@ describe("TelegramAgentBindButton", () => {
       }),
     );
     expect(mockOpenExternal).not.toHaveBeenCalled();
+  });
+
+  it("does not report success for a malformed install response", async () => {
+    mockRegister.mockResolvedValue({});
+    renderUI(<TelegramAgentBindButton agentId="agent-1" agentName="Bot" />);
+    await userEvent.click(screen.getByTestId("telegram-agent-connect"));
+    await userEvent.type(await screen.findByTestId("telegram-bot-token"), "123456789:AAtesttoken");
+    await userEvent.click(screen.getByTestId("telegram-connect-submit"));
+    await waitFor(() => expect(mockToastError).toHaveBeenCalled());
+    expect(mockInvalidate).not.toHaveBeenCalled();
   });
 
   it("shows the connected badge (not the CTA) when the agent already has an active install", () => {
@@ -187,5 +202,12 @@ describe("TelegramTab", () => {
     installationsRef.current = { configured: true } as never;
     renderUI(<TelegramTab />);
     expect(screen.getByText(/No bots connected yet/i)).toBeTruthy();
+  });
+
+  it("shows a load error instead of pretending Telegram is disabled", () => {
+    telegramQueryErrorRef.current = true;
+    renderUI(<TelegramTab />);
+    expect(screen.getByText(/Failed to load Telegram installations/i)).toBeTruthy();
+    expect(screen.queryByText(/Telegram integration not enabled/i)).toBeNull();
   });
 });

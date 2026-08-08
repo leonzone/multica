@@ -113,6 +113,13 @@ func (r *OutboundReplier) Reply(ctx context.Context, inst engine.ResolvedInstall
 }
 
 func (r *OutboundReplier) sendBindingPrompt(ctx context.Context, inst engine.ResolvedInstallation, msg channel.InboundMessage, res engine.Result) error {
+	// A group-visible bearer link can be redeemed by another group member and
+	// would bind the original sender's Telegram identity to the wrong Multica
+	// user. Ask the sender to start a private chat first; only private-chat
+	// prompts carry a redeem token.
+	if msg.Source.ChatType == channel.ChatTypeGroup {
+		return r.post(ctx, inst, msg, msgBindingGroupHint)
+	}
 	sender := res.Sender
 	if sender == "" {
 		sender = msg.Source.SenderID
